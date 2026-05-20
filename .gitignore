@@ -1,3 +1,4 @@
 *.task
 .venv/
 faces/
+output_faces/
