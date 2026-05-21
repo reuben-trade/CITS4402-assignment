@@ -6,9 +6,12 @@ from mediapipe.tasks.python import vision
 import numpy as np
 import matplotlib.pyplot as plt
 from pathlib import Path 
+from insightface.app import FaceAnalysis
+from sklearn.cluster import DBSCAN
+from collections import defaultdict
 
 
-class FeatureExtractor:
+class FaceProcessor:
 
     def __init__(self):
         base_options = python.BaseOptions(model_asset_path='face_landmarker_v2_with_blendshapes.task')
@@ -17,8 +20,18 @@ class FeatureExtractor:
                                        output_facial_transformation_matrixes=True,
                                        num_faces=5)
         self.detector = vision.FaceLandmarker.create_from_options(options)
+        self.app = FaceAnalysis(name="buffalo_l", providers=["CPUExecutionProvider"])
+        self.app.prepare(ctx_id=-1, det_size=(160, 160))
 
-    def process_faces(self, folder_name: str, total_faces: int):
+    def embed(self, crop_bgr: np.ndarray):
+        """Return an L2-normalised 512-D vector, or None if no face is detected."""
+        upscaled = cv2.resize(crop_bgr, (160, 160), interpolation=cv2.INTER_CUBIC)
+        faces = self.app.get(upscaled)
+        if not faces:
+            return None
+        return faces[0].normed_embedding
+    
+    def process_faces(self, folder_name: str, total_faces: int = 1):
         """
         faces_folder: list containing all image files
         total_faces:  the # of faces across all files
@@ -108,7 +121,76 @@ class FeatureExtractor:
                 filename = f"img_{idx}_face_{face_idx}.jpg"
                 output_path = f"output_faces/{filename}" 
                 cv2.imwrite(output_path, aligned_img) # store output image 
-
+                                
                 face_idx += 1 # onto the next face
 
+    def similarity(self, crops_folder: str = "output_faces", eps: float = 0.4):
+        """
+        Embed every crop in `crops_folder`, cluster with DBSCAN on cosine distance,
+        and return groupings.
+
+        Returns:
+            groups: dict mapping cluster_id -> list of filenames
+            labels: list of (filename, cluster_id) in input order
+        """
+        crop_paths = sorted(Path(crops_folder).glob("*.jpg"))
+
+        embeddings, names = [], []
+        for p in crop_paths:
+            crop = cv2.imread(str(p))
+            if crop is None:
+                continue
+            emb = self.embed(crop)
+            if emb is None:
+                print(f"[skip] no embedding for {p.name}")
+                continue
+            embeddings.append(emb)
+            names.append(p.name)
+
+        if not embeddings:
+            return {}, []
+
+        X = np.vstack(embeddings)
+        cluster_ids = DBSCAN(eps=eps, metric="cosine", min_samples=1).fit(X).labels_
+
+        groups = defaultdict(list)
+        labels = []
+        for name, cid in zip(names, cluster_ids):
+            groups[int(cid)].append(name)
+            labels.append((name, int(cid)))
+
+        print(f"\n{len(names)} faces → {len(groups)} identities\n")
+        for cid in sorted(groups):
+            print(f"  identity {cid}:")
+            for n in groups[cid]:
+                print(f"    {n}")
+
+        return dict(groups), labels
+
+    def plot_clusters(self, groups: dict, crops_folder: str = "output_faces"):
+        """Plot one row per identity cluster, showing each face in that cluster."""
+        if not groups:
+            print("Nothing to plot.")
+            return
+
+        n_rows = len(groups)
+        n_cols = max(len(v) for v in groups.values())
+
+        _, axes = plt.subplots(
+            n_rows, n_cols, figsize=(2 * n_cols, 2.2 * n_rows), squeeze=False
+        )
+        for r, cid in enumerate(sorted(groups)):
+            for c in range(n_cols):
+                axes[r, c].axis("off")
+                if c < len(groups[cid]):
+                    name = groups[cid][c]
+                    crop = cv2.imread(str(Path(crops_folder) / name))
+                    axes[r, c].imshow(cv2.cvtColor(crop, cv2.COLOR_BGR2RGB))
+                    axes[r, c].set_title(name, fontsize=7)
+            axes[r, 0].set_ylabel(
+                f"identity {cid}", rotation=0, ha="right", va="center", fontsize=9
+            )
+
+        plt.tight_layout()
+        plt.show()
 
