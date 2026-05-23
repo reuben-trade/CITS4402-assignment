@@ -1,0 +1,8 @@
+opencv-python
+Pillow
+mediapipe
+numpy
+matplotlib
+insightface
+scikit-learn
+onnxruntime

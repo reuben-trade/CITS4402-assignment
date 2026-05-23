@@ -2,3 +2,5 @@
 .venv/
 faces/
 output_faces/
+__pychache__/
+*.__pychache__*.pyo

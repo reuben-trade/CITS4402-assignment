@@ -10,6 +10,15 @@ from insightface.app import FaceAnalysis
 from sklearn.cluster import DBSCAN
 from collections import defaultdict
 
+class Detection:
+    """ Create a class for information about the detected image.
+      Track the box around the image, location of the face points 
+      and warped face. Embeddings are used for the bulk processing. """
+    def __init__(self, bbox, landmarks, aligned_crop, embedding=None):
+        self.bbox = bbox
+        self.landmarks = landmarks 
+        self.aligned_crop = aligned_crop
+        self.embedding = embedding
 
 class FaceProcessor:
 
@@ -166,6 +175,83 @@ class FaceProcessor:
                 print(f"    {n}")
 
         return dict(groups), labels
+    
+    def detect_one(self, img_bgr: np.ndarray, do_embed: bool = True) -> list:
+        """
+        Run MediaPipe on a single BGR image and return one Detection per face. 
+        
+        """
+        img_h, img_w = img_bgr.shape[:2]
+        mp_image = mp.Image(
+            image_format=mp.ImageFormat.SRGB,
+            data=cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
+        )
+        result = self.detector.detect(mp_image)
+        if not result.face_landmarks:
+            return[]
+        detections = []
+        for face in result.face_landmarks:
+            # Indicies 468/473 are iris centres 
+            # MediaPipe returns normalised [0-1] coords so can scale to pixels
+            left_eye = (int(face[468].x * img_w), int(face[468].y * img_h))
+            right_eye = (int(face[473].x * img_w), int(face[473].y * img_h))
+            nose = (int(face[4].x * img_w), int(face[4].y * img_h))
+
+            # Bounding box fr min max of all landmark pixels 
+            xs = [int(lm.x * img_w) for lm in face]
+            ys = [int(lm.y * img_h) for lm in face]
+            bbox = (max(0, min(xs)), max(0, min(ys)),
+                    min(img_w - 1, max(xs)), min(img_h -1, max(ys)))
+            
+            # Map the detected eye and nose positions onto fixed canonical positions
+            src = np.array([left_eye, right_eye, nose], dtype=np.float32)
+            dst = np.array([(40, 40), (85, 40), (63, 70)], dtype=np.float32)
+            M, _ = cv2.estimateAffinePartial2D(src, dst)
+            aligned_crop = cv2.warpAffine(img_bgr, M, (125, 125))
+
+            # Compute embedding for bulk mode 
+            embedding = self.embed(aligned_crop) if do_embed else None
+
+            detections.append(Detection(
+                bbox=bbox,
+                landmarks={"left_eye": left_eye, "right_eye": right_eye, "nose": nose},
+                aligned_crop=aligned_crop,
+                embedding=embedding,
+            ))
+        return detections
+    
+    def similarity_from_embeddings(self, embeddings: list, eps: float = 0.4) -> list:
+        """Cluster embedding vectors and return one integer label per embedding."""
+        X = np.vstack(embeddings)
+        # min_samples=1 means no face is ever an outlier so always joins cluster
+        # eps controls similarity threshold
+        labels = DBSCAN(eps=eps, metric="cosine", min_samples=1).fit(X).labels_
+        return [int(l) for l in labels]
+    
+    def plot_clusters_inmem(self, crops: list, labels: list, block: bool = True) -> None:
+        """
+        Plot one row per identity cluster using crop arrays directly.
+        """
+        # Group the index of each crop by its cluster label
+        groups = defaultdict(list)
+        for i, label in enumerate(labels):
+            groups[label].append(i)
+        
+        n_rows = len(groups)
+        n_cols = max(len(v) for v in groups.values())
+        _, axes = plt.subplots(n_rows, n_cols, figsize=(2 * n_cols, 2.2 * n_rows), squeeze=False)
+
+        for r, cid in enumerate(sorted(groups)):
+            for c in range(n_cols):
+                axes[r, c].axis("off")
+                if c < len(groups[cid]):
+                    # Convert BGR to RGB for matplotlib display 
+                    axes[r, c].imshow(cv2.cvtColor(crops[groups[cid][c]], cv2.COLOR_CGR2RGB))
+            axes[r, 0].set_ylabel(f"identity {cid}", rotation=0, ha="right", va="center", fontsize=9)
+        
+        plt.tight_layout()
+        plt.show(block=block)
+
 
     def plot_clusters(self, groups: dict, crops_folder: str = "output_faces"):
         """Plot one row per identity cluster, showing each face in that cluster."""
