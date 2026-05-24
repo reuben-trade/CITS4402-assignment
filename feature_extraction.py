@@ -10,6 +10,12 @@ from insightface.app import FaceAnalysis
 from sklearn.cluster import DBSCAN
 from collections import defaultdict
 
+ALIGNMENT_MODES = ("partial", "total")
+EMBEDDING_MODES = ("aligned_only", "original_only", "average", "concat")
+DEFAULT_ALIGNMENT = "total"
+DEFAULT_EMBEDDING = "aligned_only"
+
+
 class Detection:
     """ Create a class for information about the detected image.
       Track the box around the image, location of the face points 
@@ -39,8 +45,49 @@ class FaceProcessor:
         if not faces:
             return None
         return faces[0].normed_embedding
-    
-    def process_faces(self, folder_name: str, total_faces: int = 1):
+
+    def _align_face(self, img_bgr, left_eye, right_eye, nose, method=DEFAULT_ALIGNMENT):
+        """Warp `img_bgr` so the 3 landmarks land on canonical positions in a 125x125 crop."""
+        src = np.array([left_eye, right_eye, nose], dtype=np.float32)
+        dst = np.array([(40, 40), (85, 40), (63, 70)], dtype=np.float32)
+        if method == "partial":
+            M, _ = cv2.estimateAffinePartial2D(src, dst)
+        else:
+            M = cv2.getAffineTransform(src, dst)
+        return cv2.warpAffine(img_bgr, M, (125, 125))
+
+    def _compute_embedding(self, img_bgr, bbox, aligned_crop, method=DEFAULT_EMBEDDING):
+        """Produce an embedding vector for one face according to `method`.
+
+        Returns None if any required sub-embedding fails, so the caller's existing
+        `embedding is not None` filter cleanly drops bad detections.
+        """
+        if method == "aligned_only":
+            return self.embed(aligned_crop)
+
+        x1, y1, x2, y2 = bbox
+        bbox_crop = img_bgr[y1:y2, x1:x2]
+        if bbox_crop.size == 0:
+            return None
+
+        if method == "original_only":
+            return self.embed(bbox_crop)
+
+        e_aligned = self.embed(aligned_crop)
+        e_original = self.embed(bbox_crop)
+        if e_aligned is None or e_original is None:
+            return None
+
+        if method == "average":
+            avg = (e_aligned + e_original) * 0.5
+            n = np.linalg.norm(avg)
+            return (avg / n).astype(np.float32) if n > 0 else None
+
+        # concat -> 1024-D; downstream cosine DBSCAN handles arbitrary dims
+        return np.concatenate([e_aligned, e_original]).astype(np.float32)
+
+    def process_faces(self, folder_name: str, total_faces: int = 1,
+                      alignment_method: str = DEFAULT_ALIGNMENT):
         """
         faces_folder: list containing all image files
         total_faces:  the # of faces across all files
@@ -96,35 +143,13 @@ class FaceProcessor:
                 nose_tip_x = int(nose_tip.x * img_w)
                 nose_tip_y = int(nose_tip.y * img_h)
 
-                # Feature coordinates in original image 
-                left_eye = (left_eye_x , left_eye_y)
-                right_eye = (right_eye_x, right_eye_y)
-                nose = (nose_tip_x, nose_tip_y)
-
-                # Target coordinates for feature transform (from specifications doc)
-                new_left_eye = (40, 40)
-                new_right_eye = (85, 40)
-                new_nose = (63, 70)
-
-                # Source array
-                src = np.array([
-                    left_eye,
-                    right_eye,
-                    nose
-                ], dtype=np.float32)
-
-                # Destination array
-                dst = np.array([
-                    new_left_eye, 
-                    new_right_eye,
-                    new_nose
-                ], dtype=np.float32)
-                
-                # Estimate coordinate tranformation required to take source points to destination   
-                M, _ = cv2.estimateAffinePartial2D(src, dst)
-
-                # Compute affine transformation on original image - focused around a 125x125 window
-                aligned_img = cv2.warpAffine(img, M, (125, 125))
+                aligned_img = self._align_face(
+                    img,
+                    (left_eye_x, left_eye_y),
+                    (right_eye_x, right_eye_y),
+                    (nose_tip_x, nose_tip_y),
+                    alignment_method,
+                )
 
                 # Dynamic filename to handle multiple faces per image 
                 filename = f"img_{idx}_face_{face_idx}.jpg"
@@ -176,10 +201,15 @@ class FaceProcessor:
 
         return dict(groups), labels
     
-    def detect_one(self, img_bgr: np.ndarray, do_embed: bool = True) -> list:
+    def detect_one(
+        self,
+        img_bgr: np.ndarray,
+        do_embed: bool = True,
+        alignment_method: str = DEFAULT_ALIGNMENT,
+        embedding_method: str = DEFAULT_EMBEDDING,
+    ) -> list:
         """
-        Run MediaPipe on a single BGR image and return one Detection per face. 
-        
+        Run MediaPipe on a single BGR image and return one Detection per face.
         """
         img_h, img_w = img_bgr.shape[:2]
         mp_image = mp.Image(
@@ -191,26 +221,24 @@ class FaceProcessor:
             return[]
         detections = []
         for face in result.face_landmarks:
-            # Indicies 468/473 are iris centres 
+            # Indicies 468/473 are iris centres
             # MediaPipe returns normalised [0-1] coords so can scale to pixels
             left_eye = (int(face[468].x * img_w), int(face[468].y * img_h))
             right_eye = (int(face[473].x * img_w), int(face[473].y * img_h))
             nose = (int(face[4].x * img_w), int(face[4].y * img_h))
 
-            # Bounding box fr min max of all landmark pixels 
+            # Bounding box fr min max of all landmark pixels
             xs = [int(lm.x * img_w) for lm in face]
             ys = [int(lm.y * img_h) for lm in face]
             bbox = (max(0, min(xs)), max(0, min(ys)),
                     min(img_w - 1, max(xs)), min(img_h -1, max(ys)))
-            
-            # Map the detected eye and nose positions onto fixed canonical positions
-            src = np.array([left_eye, right_eye, nose], dtype=np.float32)
-            dst = np.array([(40, 40), (85, 40), (63, 70)], dtype=np.float32)
-            M, _ = cv2.estimateAffinePartial2D(src, dst)
-            aligned_crop = cv2.warpAffine(img_bgr, M, (125, 125))
 
-            # Compute embedding for bulk mode 
-            embedding = self.embed(aligned_crop) if do_embed else None
+            aligned_crop = self._align_face(img_bgr, left_eye, right_eye, nose, alignment_method)
+
+            embedding = (
+                self._compute_embedding(img_bgr, bbox, aligned_crop, embedding_method)
+                if do_embed else None
+            )
 
             detections.append(Detection(
                 bbox=bbox,

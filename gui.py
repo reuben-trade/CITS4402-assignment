@@ -10,7 +10,14 @@ import cv2
 import numpy as np
 from PIL import Image, ImageTk
 
-from feature_extraction import Detection, FaceProcessor
+from feature_extraction import (
+    ALIGNMENT_MODES,
+    DEFAULT_ALIGNMENT,
+    DEFAULT_EMBEDDING,
+    EMBEDDING_MODES,
+    Detection,
+    FaceProcessor,
+)
 
 # BGR colours per spec: right_eye=red, left_eye=green, nose=blue
 COLOUR_RIGHT_EYE = (0, 0, 255)
@@ -175,8 +182,19 @@ class FaceApp(tk.Tk):
         )
         self.status.grid(row=2, column=0, columnspan=2, padx=8, sticky="we")
 
+        method_frame = tk.Frame(self)
+        method_frame.grid(row=3, column=0, columnspan=2, pady=(0, 4))
+
+        self.alignment_var = tk.StringVar(value=DEFAULT_ALIGNMENT)
+        self.embedding_var = tk.StringVar(value=DEFAULT_EMBEDDING)
+
+        tk.Label(method_frame, text="Alignment:").pack(side="left", padx=(0, 4))
+        tk.OptionMenu(method_frame, self.alignment_var, *ALIGNMENT_MODES).pack(side="left", padx=(0, 16))
+        tk.Label(method_frame, text="Embedding:").pack(side="left", padx=(0, 4))
+        tk.OptionMenu(method_frame, self.embedding_var, *EMBEDDING_MODES).pack(side="left")
+
         button_frame = tk.Frame(self)
-        button_frame.grid(row=3, column=0, columnspan=2, pady=8)
+        button_frame.grid(row=4, column=0, columnspan=2, pady=8)
 
         self.single_btn = tk.Button(button_frame, text="Single Image", width=18, command=self._on_single)
         self.single_btn.pack(side="left", padx=12)
@@ -231,7 +249,11 @@ class FaceApp(tk.Tk):
         self.update_idletasks()
 
         t0 = time.perf_counter()
-        dets = self.fp.detect_one(img, do_embed=False)
+        dets = self.fp.detect_one(
+            img,
+            do_embed=False,
+            alignment_method=self.alignment_var.get(),
+        )
         dt = time.perf_counter() - t0
 
         annotated = composite_on_canvas(img, dets)
@@ -268,6 +290,9 @@ class FaceApp(tk.Tk):
             shutil.rmtree(out_dir)
         out_dir.mkdir(parents=True)
 
+        alignment_method = self.alignment_var.get()
+        embedding_method = self.embedding_var.get()
+
         image_paths = sorted(
             p for p in folder_path.iterdir()
             if p.is_file() and p.suffix.lower() in IMAGE_EXTS
@@ -286,7 +311,12 @@ class FaceApp(tk.Tk):
             if img is None:
                 continue
             img = fit_within(img)
-            dets = self.fp.detect_one(img, do_embed=True)
+            dets = self.fp.detect_one(
+                img,
+                do_embed=True,
+                alignment_method=alignment_method,
+                embedding_method=embedding_method,
+            )
             all_dets.extend(dets)
 
             if first_annotated is None and dets:
@@ -316,6 +346,7 @@ class FaceApp(tk.Tk):
         n_identities = len(set(labels))
 
         summary = (
+            f"[align={alignment_method} embed={embedding_method}] "
             f"Total {n_images} images processed in {dt:.2f} seconds. "
             f"{n_faces} faces detected corresponding to {n_identities} unique identities. "
             f"Crops saved to {out_dir}"
