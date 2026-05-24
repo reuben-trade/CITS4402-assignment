@@ -9,6 +9,8 @@ from pathlib import Path
 from insightface.app import FaceAnalysis
 from sklearn.cluster import DBSCAN
 from collections import defaultdict
+from skin_segmentation import skin_mask_ycrcb, skin_ratio_in_bbox
+
 
 class Detection:
     """ Create a class for information about the detected image.
@@ -176,10 +178,10 @@ class FaceProcessor:
 
         return dict(groups), labels
     
-    def detect_one(self, img_bgr: np.ndarray, do_embed: bool = True) -> list:
+    def detect_one(self, img_bgr: np.ndarray, do_embed: bool = True,
+                   skin_threshold: float = 0.1) -> list:
         """
         Run MediaPipe on a single BGR image and return one Detection per face. 
-        
         """
         img_h, img_w = img_bgr.shape[:2]
         mp_image = mp.Image(
@@ -203,6 +205,12 @@ class FaceProcessor:
             bbox = (max(0, min(xs)), max(0, min(ys)),
                     min(img_w - 1, max(xs)), min(img_h -1, max(ys)))
             
+            # Filter out detections with very low skin pixel ratio (false positives)
+            # Low threshold to about rejecting darker skin tones
+            skin_mask = skin_mask_ycrcb(img_bgr)
+            if skin_ratio_in_bbox(skin_mask, bbox) < skin_threshold:
+                continue
+            
             # Map the detected eye and nose positions onto fixed canonical positions
             src = np.array([left_eye, right_eye, nose], dtype=np.float32)
             dst = np.array([(40, 40), (85, 40), (63, 70)], dtype=np.float32)
@@ -220,7 +228,7 @@ class FaceProcessor:
             ))
         return detections
     
-    def similarity_from_embeddings(self, embeddings: list, eps: float = 0.7) -> list:
+    def similarity_from_embeddings(self, embeddings: list, eps: float = 0.6) -> list:
         """Cluster embedding vectors and return one integer label per embedding."""
         X = np.vstack(embeddings)
         # min_samples=1 means no face is ever an outlier so always joins cluster
