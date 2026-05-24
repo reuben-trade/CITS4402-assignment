@@ -133,7 +133,7 @@ class FaceProcessor:
                                 
                 face_idx += 1 # onto the next face
 
-    def similarity(self, crops_folder: str = "output_faces", eps: float = 0.4):
+    def similarity(self, crops_folder: str = "output_faces", eps: float = 0.7):
         """
         Embed every crop in `crops_folder`, cluster with DBSCAN on cosine distance,
         and return groupings.
@@ -220,7 +220,7 @@ class FaceProcessor:
             ))
         return detections
     
-    def similarity_from_embeddings(self, embeddings: list, eps: float = 0.4) -> list:
+    def similarity_from_embeddings(self, embeddings: list, eps: float = 0.7) -> list:
         """Cluster embedding vectors and return one integer label per embedding."""
         X = np.vstack(embeddings)
         # min_samples=1 means no face is ever an outlier so always joins cluster
@@ -246,7 +246,7 @@ class FaceProcessor:
                 axes[r, c].axis("off")
                 if c < len(groups[cid]):
                     # Convert BGR to RGB for matplotlib display 
-                    axes[r, c].imshow(cv2.cvtColor(crops[groups[cid][c]], cv2.COLOR_CGR2RGB))
+                    axes[r, c].imshow(cv2.cvtColor(crops[groups[cid][c]], cv2.COLOR_BGR2RGB))
             axes[r, 0].set_ylabel(f"identity {cid}", rotation=0, ha="right", va="center", fontsize=9)
         
         plt.tight_layout()
