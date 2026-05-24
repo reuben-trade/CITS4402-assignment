@@ -29,7 +29,10 @@ class FaceProcessor:
         options = vision.FaceLandmarkerOptions(base_options=base_options,
                                        output_face_blendshapes=True,
                                        output_facial_transformation_matrixes=True,
-                                       num_faces=5)
+                                       num_faces=5,
+                                       min_face_detection_confidence=0.3,
+                                       min_face_presence_confidence=0.3
+                                       )
         self.detector = vision.FaceLandmarker.create_from_options(options)
         self.app = FaceAnalysis(name="buffalo_l", providers=["CPUExecutionProvider"])
         self.app.prepare(ctx_id=-1, det_size=(160, 160))
@@ -123,7 +126,7 @@ class FaceProcessor:
                 ], dtype=np.float32)
                 
                 # Estimate coordinate tranformation required to take source points to destination   
-                M, _ = cv2.estimateAffinePartial2D(src, dst)
+                M = cv2.getAffineTransform(src, dst)
 
                 # Compute affine transformation on original image - focused around a 125x125 window
                 aligned_img = cv2.warpAffine(img, M, (125, 125))
@@ -214,7 +217,7 @@ class FaceProcessor:
             # Map the detected eye and nose positions onto fixed canonical positions
             src = np.array([left_eye, right_eye, nose], dtype=np.float32)
             dst = np.array([(40, 40), (85, 40), (63, 70)], dtype=np.float32)
-            M, _ = cv2.estimateAffinePartial2D(src, dst)
+            M = cv2.getAffinePartial2D(src, dst)
             aligned_crop = cv2.warpAffine(img_bgr, M, (125, 125))
 
             # Compute embedding for bulk mode 
